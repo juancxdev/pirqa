@@ -1,0 +1,17 @@
+# Binarios
+pirqa
+pirqa.exe
+dist/
+
+# Go
+*.test
+*.out
+vendor/
+
+# Caché de pirqa
+.pirqa/
+
+# IDE
+.vscode/
+.idea/
+*.swp
