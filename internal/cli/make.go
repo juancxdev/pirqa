@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
@@ -79,18 +80,27 @@ func runMake(cmd *cobra.Command, args []string) error {
 
 // RumiConfig es el struct del rumi.yaml
 type RumiConfig struct {
-	Name        string             `yaml:"name"`
-	Description string             `yaml:"description"`
-	Version     string             `yaml:"version"`
-	Technology  string             `yaml:"technology"`
-	Vars        map[string]VarDef  `yaml:"vars"`
+	Name        string            `yaml:"name"`
+	Description string            `yaml:"description"`
+	Version     string            `yaml:"version"`
+	Technology  string            `yaml:"technology"`
+	Vars        map[string]VarDef `yaml:"vars"`
+}
+
+// ArrayItemField define un sub-campo de una variable tipo array
+type ArrayItemField struct {
+	Name    string `yaml:"name"`
+	Prompt  string `yaml:"prompt"`
+	Default string `yaml:"default,omitempty"`
 }
 
 type VarDef struct {
-	Type        string `yaml:"type"`
-	Description string `yaml:"description"`
-	Default     string `yaml:"default,omitempty"`
-	Prompt      string `yaml:"prompt"`
+	Type        string           `yaml:"type"`
+	Description string           `yaml:"description"`
+	Default     string           `yaml:"default,omitempty"`
+	Prompt      string           `yaml:"prompt"`
+	ItemFields  []ArrayItemField `yaml:"item_fields,omitempty"`
+	Order       int              `yaml:"order,omitempty"`
 }
 
 func loadRumiConfig(rumiDir string) (*RumiConfig, error) {
@@ -106,9 +116,32 @@ func loadRumiConfig(rumiDir string) (*RumiConfig, error) {
 }
 
 func findRumi(name string) (string, error) {
-	// Buscar en orden:
-	// 1. Directorio local con ese nombre
-	// 2. Caché de pirqa (~/.pirqa/rumis/<name>)
+	// 1. Buscar en pirqa.yaml del proyecto actual (registrado con 'pirqa add')
+	if data, err := os.ReadFile("pirqa.yaml"); err == nil {
+		var config PirqaConfig
+		if yaml.Unmarshal(data, &config) == nil {
+			for _, entry := range config.Rumis {
+				if entry.Name != name {
+					continue
+				}
+				// Rumi registrado con --path local
+				if entry.Path != "" {
+					if _, err := os.Stat(filepath.Join(entry.Path, "rumi.yaml")); err == nil {
+						return entry.Path, nil
+					}
+				}
+				// Rumi registrado con --git → buscar en caché ~/.pirqa/rumis/<name>
+				if entry.Git != "" {
+					cachePath := filepath.Join(os.Getenv("HOME"), ".pirqa", "rumis", name)
+					if _, err := os.Stat(filepath.Join(cachePath, "rumi.yaml")); err == nil {
+						return cachePath, nil
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Fallback: buscar directorio local con ese nombre
 	candidates := []string{
 		name,
 		filepath.Join(".", name),
@@ -126,7 +159,21 @@ func findRumi(name string) (string, error) {
 func collectVars(varDefs map[string]VarDef) (map[string]any, error) {
 	result := make(map[string]any)
 
-	for key, def := range varDefs {
+	// Ordenar las keys para un prompt consistente (por Order si existe, luego alfabético)
+	keys := make([]string, 0, len(varDefs))
+	for k := range varDefs {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		oi, oj := varDefs[keys[i]].Order, varDefs[keys[j]].Order
+		if oi != oj {
+			return oi < oj
+		}
+		return keys[i] < keys[j]
+	})
+
+	for _, key := range keys {
+		def := varDefs[key]
 		switch def.Type {
 		case "boolean":
 			var answer bool
@@ -138,6 +185,50 @@ func collectVars(varDefs map[string]VarDef) (map[string]any, error) {
 				return nil, err
 			}
 			result[key] = answer
+
+		case "array":
+			if len(def.ItemFields) == 0 {
+				result[key] = []map[string]string{}
+				continue
+			}
+			color.Cyan("\n%s", def.Prompt)
+			color.Yellow("  (Presiona ENTER sin escribir nada, o escribe 'exit' para terminar)\n")
+			var items []map[string]string
+			for itemIdx := 1; ; itemIdx++ {
+				color.White("  → Ítem %d:", itemIdx)
+				item := map[string]string{}
+
+				// El primer sub-campo decide si continuamos o no
+				first := def.ItemFields[0]
+				var firstVal string
+				if err := survey.AskOne(
+					&survey.Input{Message: first.Prompt, Default: first.Default},
+					&firstVal,
+				); err != nil {
+					return nil, err
+				}
+
+				val := strings.TrimSpace(firstVal)
+				// Salir si está vacío o si escribe comandos típicos de salida
+				if val == "" || val == "exit" || val == "quit" || val == "q" {
+					break
+				}
+				item[first.Name] = val
+
+				// Resto de sub-campos
+				for _, f := range def.ItemFields[1:] {
+					var otherVal string
+					if err := survey.AskOne(
+						&survey.Input{Message: f.Prompt, Default: f.Default},
+						&otherVal,
+					); err != nil {
+						return nil, err
+					}
+					item[f.Name] = strings.TrimSpace(otherVal)
+				}
+				items = append(items, item)
+			}
+			result[key] = items
 
 		default: // string
 			var answer string

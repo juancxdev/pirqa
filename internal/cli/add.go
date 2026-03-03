@@ -96,16 +96,18 @@ func addRumiToConfig(entry RumiEntry) error {
 		return err
 	}
 
-	// Verificar que no esté ya registrado
-	for _, r := range config.Rumis {
+	// Upsert: actualizar si ya existe, agregar si no
+	found := false
+	for i, r := range config.Rumis {
 		if r.Name == entry.Name {
-			color.Yellow("⚠️  El rumi '%s' ya está registrado en pirqa.yaml", entry.Name)
-			return nil
+			config.Rumis[i] = entry // actualiza path/git si cambió
+			found = true
+			break
 		}
 	}
-
-	// Agregar
-	config.Rumis = append(config.Rumis, entry)
+	if !found {
+		config.Rumis = append(config.Rumis, entry)
+	}
 
 	// Guardar
 	out, err := yaml.Marshal(&config)
